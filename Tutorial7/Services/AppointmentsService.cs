@@ -180,4 +180,67 @@ public class AppointmentsService : IAppointmentsService
         if (count > 0)
             throw new InvalidOperationException("The doctor already has a Scheduled appointment at this time.");
     }
+    public async Task<bool> UpdateAppointmentAsync(int idAppointment, UpdateAppointmentRequestDto dto)
+    {
+        var current = await GetAppointmentByIdAsync(idAppointment);
+        if (current is null) return false;
+
+        if (current.Status == "Completed" && current.AppointmentDate != dto.AppointmentDate)
+            throw new InvalidOperationException("Cannot change the date of a Completed appointment.");
+
+        await using var connection = new SqlConnection(_connectionString);
+        await connection.OpenAsync();
+
+        await ValidatePatientAsync(connection, dto.IdPatient);
+        await ValidateDoctorAsync(connection, dto.IdDoctor);
+
+        if (current.AppointmentDate != dto.AppointmentDate)
+            await CheckDoctorConflictAsync(connection, dto.IdDoctor, dto.AppointmentDate, idAppointment);
+
+        const string sql = """
+            UPDATE dbo.Appointments
+            SET    IdPatient       = @IdPatient,
+                   IdDoctor        = @IdDoctor,
+                   AppointmentDate = @AppointmentDate,
+                   Status          = @Status,
+                   Reason          = @Reason,
+                   InternalNotes   = @InternalNotes
+            WHERE  IdAppointment   = @IdAppointment;
+            """;
+
+        await using var command = new SqlCommand(sql, connection);
+        command.Parameters.Add("@IdPatient",       SqlDbType.Int).Value           = dto.IdPatient;
+        command.Parameters.Add("@IdDoctor",        SqlDbType.Int).Value           = dto.IdDoctor;
+        command.Parameters.Add("@AppointmentDate", SqlDbType.DateTime2).Value     = dto.AppointmentDate;
+        command.Parameters.Add("@Status",          SqlDbType.NVarChar, 30).Value  = dto.Status;
+        command.Parameters.Add("@Reason",          SqlDbType.NVarChar, 250).Value = dto.Reason;
+        command.Parameters.Add("@InternalNotes",   SqlDbType.NVarChar, 500).Value =
+            (object?)dto.InternalNotes ?? DBNull.Value;
+        command.Parameters.Add("@IdAppointment",   SqlDbType.Int).Value           = idAppointment;
+
+        await command.ExecuteNonQueryAsync();
+        return true;
+    }
+
+    public async Task<bool> DeleteAppointmentAsync(int idAppointment)
+    {
+        await using var connection = new SqlConnection(_connectionString);
+        await connection.OpenAsync();
+
+        const string statusSql = "SELECT Status FROM dbo.Appointments WHERE IdAppointment = @Id;";
+        await using var statusCmd = new SqlCommand(statusSql, connection);
+        statusCmd.Parameters.Add("@Id", SqlDbType.Int).Value = idAppointment;
+
+        var status = (string?)await statusCmd.ExecuteScalarAsync();
+        if (status is null) return false;
+
+        if (status == "Completed")
+            throw new InvalidOperationException("Cannot delete a Completed appointment.");
+
+        const string deleteSql = "DELETE FROM dbo.Appointments WHERE IdAppointment = @Id;";
+        await using var deleteCmd = new SqlCommand(deleteSql, connection);
+        deleteCmd.Parameters.Add("@Id", SqlDbType.Int).Value = idAppointment;
+        await deleteCmd.ExecuteNonQueryAsync();
+        return true;
+    }
 }
