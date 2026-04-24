@@ -33,14 +33,14 @@ public class AppointmentsService : IAppointmentsService
 
         await using var connection = new SqlConnection(_connectionString);
         await connection.OpenAsync();
-        
-        await using var command = new SqlCommand(query, connection);
 
+        await using var command = new SqlCommand(query, connection);
+        
         command.Parameters.Add("@Status", SqlDbType.NVarChar, 30).Value =
             (object?)status ?? DBNull.Value;
         command.Parameters.Add("@PatientLastName", SqlDbType.NVarChar, 80).Value =
             (object?)patientLastName ?? DBNull.Value;
-        
+
         await using var reader = await command.ExecuteReaderAsync();
 
         var appointments = new List<AppointmentListDto>();
@@ -109,5 +109,75 @@ public class AppointmentsService : IAppointmentsService
             LicenseNumber   = reader.GetString(10),
             Specialization  = reader.GetString(11),
         };
+    }
+
+    public async Task<int> CreateAppointmentAsync(CreateAppointmentRequestDto dto)
+    {
+        if (dto.AppointmentDate <= DateTime.UtcNow)
+            throw new ArgumentException("Appointment date must be in the future.");
+
+        if (string.IsNullOrWhiteSpace(dto.Reason))
+            throw new ArgumentException("Reason cannot be empty.");
+
+        await using var connection = new SqlConnection(_connectionString);
+        await connection.OpenAsync();
+
+        await ValidatePatientAsync(connection, dto.IdPatient);
+        await ValidateDoctorAsync(connection, dto.IdDoctor);
+        await CheckDoctorConflictAsync(connection, dto.IdDoctor, dto.AppointmentDate, null);
+
+        const string sql = """
+            INSERT INTO dbo.Appointments (IdPatient, IdDoctor, AppointmentDate, Status, Reason)
+            OUTPUT INSERTED.IdAppointment
+            VALUES (@IdPatient, @IdDoctor, @AppointmentDate, N'Scheduled', @Reason);
+            """;
+
+        await using var command = new SqlCommand(sql, connection);
+        command.Parameters.Add("@IdPatient",       SqlDbType.Int).Value           = dto.IdPatient;
+        command.Parameters.Add("@IdDoctor",        SqlDbType.Int).Value           = dto.IdDoctor;
+        command.Parameters.Add("@AppointmentDate", SqlDbType.DateTime2).Value     = dto.AppointmentDate;
+        command.Parameters.Add("@Reason",          SqlDbType.NVarChar, 250).Value = dto.Reason;
+
+        return (int)(await command.ExecuteScalarAsync())!;
+    }
+
+    private static async Task ValidatePatientAsync(SqlConnection connection, int idPatient)
+    {
+        const string sql = "SELECT IsActive FROM dbo.Patients WHERE IdPatient = @IdPatient;";
+        await using var cmd = new SqlCommand(sql, connection);
+        cmd.Parameters.Add("@IdPatient", SqlDbType.Int).Value = idPatient;
+        var result = await cmd.ExecuteScalarAsync();
+        if (result is null)  throw new ArgumentException($"Patient {idPatient} not found.");
+        if (!(bool)result)   throw new ArgumentException($"Patient {idPatient} is not active.");
+    }
+
+    private static async Task ValidateDoctorAsync(SqlConnection connection, int idDoctor)
+    {
+        const string sql = "SELECT IsActive FROM dbo.Doctors WHERE IdDoctor = @IdDoctor;";
+        await using var cmd = new SqlCommand(sql, connection);
+        cmd.Parameters.Add("@IdDoctor", SqlDbType.Int).Value = idDoctor;
+        var result = await cmd.ExecuteScalarAsync();
+        if (result is null)  throw new ArgumentException($"Doctor {idDoctor} not found.");
+        if (!(bool)result)   throw new ArgumentException($"Doctor {idDoctor} is not active.");
+    }
+
+    private static async Task CheckDoctorConflictAsync(
+        SqlConnection connection, int idDoctor, DateTime appointmentDate, int? excludeId)
+    {
+        const string sql = """
+            SELECT COUNT(1) FROM dbo.Appointments
+            WHERE  IdDoctor        = @IdDoctor
+              AND  AppointmentDate = @AppointmentDate
+              AND  Status          = N'Scheduled'
+              AND  (@ExcludeId     IS NULL OR IdAppointment <> @ExcludeId);
+            """;
+        await using var cmd = new SqlCommand(sql, connection);
+        cmd.Parameters.Add("@IdDoctor",        SqlDbType.Int).Value       = idDoctor;
+        cmd.Parameters.Add("@AppointmentDate", SqlDbType.DateTime2).Value = appointmentDate;
+        cmd.Parameters.Add("@ExcludeId",       SqlDbType.Int).Value       =
+            (object?)excludeId ?? DBNull.Value;
+        var count = (int)(await cmd.ExecuteScalarAsync())!;
+        if (count > 0)
+            throw new InvalidOperationException("The doctor already has a Scheduled appointment at this time.");
     }
 }
