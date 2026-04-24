@@ -1,8 +1,9 @@
+using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Tutorial7.DTOs;
 using Tutorial7.Services;
 
-namespace ClinicAdoNet.Controllers;
+namespace Tutorial7.Controllers; 
 
 [Route("api/[controller]")] 
 [ApiController]
